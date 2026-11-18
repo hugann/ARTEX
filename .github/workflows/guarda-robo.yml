@@ -1,0 +1,67 @@
+# guarda-robo (DSP-131). Cópia mestra: hugann/despacho, guarda/guarda-robo.yml; quem instala e atualiza é o
+# guarda/instalar_guarda.py, com o login do Victor. A conta de robô do agy não consegue mudar este arquivo
+# (o token dela não tem o escopo "workflow").
+# Em push num branch vigiado:
+# - push forçado (de qualquer pessoa): abre issue de aviso; a versão anterior está no espelho do VPS;
+# - push da conta de robô: devolve o branch ao estado de antes (um commit novo, nada é apagado) e abre issue.
+# O commit de volta é feito com o token do próprio Actions, que não dispara outro workflow.
+name: guarda-robo
+on:
+  push:
+    branches: ["main"]
+permissions:
+  contents: write
+  issues: write
+concurrency:
+  group: guarda-robo-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  guarda:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      ROBO: artblockenigma-ops
+      GH_TOKEN: ${{ github.token }}
+      PUSHER: ${{ github.event.pusher.name }}
+      ATOR: ${{ github.actor }}
+      FORCADO: ${{ github.event.forced }}
+      ANTES: ${{ github.event.before }}
+      DEPOIS: ${{ github.event.after }}
+      RAMO: ${{ github.ref_name }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Quem empurrou
+        id: quem
+        run: |
+          robo=nao
+          if [ "$PUSHER" = "$ROBO" ] || [ "$ATOR" = "$ROBO" ]; then robo=sim; fi
+          echo "robo=$robo" >> "$GITHUB_OUTPUT"
+          echo "pusher=$PUSHER ator=$ATOR forcado=$FORCADO robo=$robo"
+      - name: Push forçado
+        if: github.event.forced
+        run: |
+          gh issue create -R "$REPO" --title "[guarda-robo] push forçado no $RAMO" --body "Quem: $PUSHER. Antes: $ANTES. Depois: $DEPOIS. A versão anterior está no espelho do VPS (/srv/espelho-git); receita em despacho/guarda/README.md." || echo "::warning::push forçado no $RAMO por $PUSHER"
+      - uses: actions/checkout@v4
+        if: steps.quem.outputs.robo == 'sim' && !github.event.forced
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - name: Desfaz o push do robô
+        if: steps.quem.outputs.robo == 'sim' && !github.event.forced
+        run: |
+          set -eu
+          if [ "$ANTES" = "0000000000000000000000000000000000000000" ]; then
+            gh issue create -R "$REPO" --title "[guarda-robo] o robô criou o branch $RAMO" --body "Depois: $DEPOIS. Nada foi desfeito; confira e apague o branch se for o caso." || true
+            exit 0
+          fi
+          lista=$(git log --oneline "$ANTES..$DEPOIS" | head -20)
+          git config user.name "guarda-robo"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git read-tree -u --reset "$ANTES"
+          git commit -q --allow-empty -m "guarda-robo: desfaz o push do robô no $RAMO (volta a ${ANTES:0:7})"
+          if git push origin "HEAD:$RAMO"; then
+            estado="desfeito: o branch voltou ao conteúdo de ${ANTES:0:7}"
+          else
+            estado="NÃO desfeito (o push de volta falhou; confira à mão)"
+          fi
+          gh issue create -R "$REPO" --title "[guarda-robo] push do robô no $RAMO" --body "$(printf 'Estado: %s.\nAntes: %s\nDepois: %s\nCommits do robô:\n%s\n\nOs commits continuam no histórico; para aproveitar, abra um PR a partir deles.' "$estado" "$ANTES" "$DEPOIS" "$lista")" || echo "::warning::push do robô no $RAMO: $estado"
